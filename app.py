@@ -53,41 +53,31 @@ if lat != st.session_state.lat or lon != st.session_state.lon:
 
 st.sidebar.header("⚙️ Forecast Settings")
 
-model_choice = st.sidebar.selectbox(
-    "Ensemble Model",
-    ["AIFS (ECMWF AI)", "IFS (ECMWF Physics)", "GEFS (NCEP/American)", "Superensemble (All 3)"]
-)
-
-# Using the validated model mapping strings provided
-model_mapping = {
-    "AIFS (ECMWF AI)": {
-        "ens": "ecmwf_aifs025_ensemble", 
-        "det": "ecmwf_aifs025_single"
-    },
-    "IFS (ECMWF Physics)": {
-        "ens": "ecmwf_ifs025_ensemble", 
-        "det": "ecmwf_ifs025"
-    },
-    "GEFS (NCEP/American)": {
-        "ens": "gfs_seamless", 
-        "det": "gfs_seamless"
-    },
-    "Superensemble (All 3)": {
-        "ens": "ecmwf_aifs025_ensemble,ecmwf_ifs025_ensemble,gfs_seamless", 
-        "det": "ecmwf_aifs025_single,ecmwf_ifs025,gfs_seamless,ncep_nbm_conus"
-    }
-}
-selected_models = model_mapping[model_choice]
-
 variable = st.sidebar.selectbox(
     "Weather Variable",
     ["temperature_2m_max", "temperature_2m_min", "precipitation_sum"],
     format_func=lambda x: x.replace("_", " ").title()
 )
 
-# --- REVERTED CACHE: Clean two-call API approach ---
+# --- NEW: Checkbox Toggles ---
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🎛️ Plot Display Toggles")
+
+st.sidebar.markdown("**Ensembles (Box Plots)**")
+show_aifs_ens = st.sidebar.checkbox("AIFS Ensemble Spread", value=True)
+show_ifs_ens = st.sidebar.checkbox("IFS Ensemble Spread", value=True)
+show_gefs_ens = st.sidebar.checkbox("GEFS Ensemble Spread", value=True)
+
+st.sidebar.markdown("**Deterministic (Lines)**")
+show_aifs_det = st.sidebar.checkbox("AIFS Single", value=True)
+show_ifs_det = st.sidebar.checkbox("IFS High-Res", value=True)
+show_gfs_det = st.sidebar.checkbox("GFS Operational", value=True)
+show_nbm = st.sidebar.checkbox("NBM (US Only)", value=True)
+
+
+# --- CACHE: Hardcoded for Superensemble fetching ---
 @st.cache_data(ttl=3600, show_spinner="Fetching ensemble and deterministic data...")
-def get_weather_data(lat, lon, var, ens_models, det_models):
+def get_weather_data(lat, lon, var):
     base_params = {
         "latitude": lat,
         "longitude": lon,
@@ -98,15 +88,15 @@ def get_weather_data(lat, lon, var, ens_models, det_models):
         "forecast_days": 15
     }
     
-    # 1. Fetch Ensembles
+    # 1. Fetch All Ensembles
     ens_params = base_params.copy()
-    ens_params["models"] = ens_models
+    ens_params["models"] = "ecmwf_aifs025_ensemble,ecmwf_ifs025_ensemble,gfs_seamless"
     ens_response = requests.get("https://ensemble-api.open-meteo.com/v1/ensemble", params=ens_params)
     ens_response.raise_for_status()
     
-    # 2. Fetch Deterministic Runs
+    # 2. Fetch All Deterministic Runs
     det_params = base_params.copy()
-    det_params["models"] = det_models
+    det_params["models"] = "ecmwf_aifs025_single,ecmwf_ifs025,gfs_seamless,ncep_nbm_conus"
     det_response = requests.get("https://api.open-meteo.com/v1/forecast", params=det_params)
     det_response.raise_for_status()
     
@@ -120,8 +110,7 @@ if st.sidebar.button("Generate Forecast", type="primary", use_container_width=Tr
 
 if st.session_state.data_loaded:
     try:
-        is_super = model_choice == "Superensemble (All 3)"
-        ens_data, det_data, fetch_time = get_weather_data(lat, lon, variable, selected_models["ens"], selected_models["det"])
+        ens_data, det_data, fetch_time = get_weather_data(lat, lon, variable)
 
         # --- PROCESS ENSEMBLE DATA ---
         daily_ens = ens_data["daily"]
@@ -135,7 +124,6 @@ if st.session_state.data_loaded:
 
         df["ensemble_median"] = df[member_columns].median(axis=1)
 
-        # Get units robustly
         unit = ""
         if "daily_units" in ens_data:
             for k, v in ens_data["daily_units"].items():
@@ -145,98 +133,88 @@ if st.session_state.data_loaded:
 
         display_name = variable.replace("_", " ").title()
 
+        # --- BUCKET MEMBERS ---
+        aifs_cols = [c for c in member_columns if "aifs" in c]
+        ifs_cols = [c for c in member_columns if "ifs" in c and "aifs" not in c]
+        gefs_cols = [c for c in member_columns if "gfs" in c or "gefs" in c]
+        
+        if not gefs_cols:
+            assigned = set(aifs_cols + ifs_cols)
+            gefs_cols = [c for c in member_columns if c not in assigned]
+        
+        # Calculate base medians for the table
+        df["AIFS Median"] = df[aifs_cols].median(axis=1)
+        df["IFS Median"] = df[ifs_cols].median(axis=1)
+        df["GEFS Median"] = df[gefs_cols].median(axis=1)
+
         # --- PROCESS DETERMINISTIC DATA ---
         daily_det = det_data["daily"]
         det_lines = {}
         
-        if is_super:
-            k_aifs = [k for k in daily_det.keys() if k.startswith(variable) and "aifs" in k]
-            if k_aifs: det_lines["AIFS Deterministic"] = daily_det[k_aifs[0]]
-            
-            k_ifs = [k for k in daily_det.keys() if k.startswith(variable) and "ifs" in k and "aifs" not in k]
-            if k_ifs: det_lines["IFS Deterministic"] = daily_det[k_ifs[0]]
-            
-            k_gfs = [k for k in daily_det.keys() if k.startswith(variable) and "gfs" in k]
-            if k_gfs: det_lines["GFS Deterministic"] = daily_det[k_gfs[0]]
-            
-            k_nbm = [k for k in daily_det.keys() if k.startswith(variable) and "nbm" in k]
-            if k_nbm: det_lines["NBM (US Only)"] = daily_det[k_nbm[0]]
-        else:
-            det_name_map = {
-                "AIFS (ECMWF AI)": "AIFS Deterministic",
-                "IFS (ECMWF Physics)": "IFS Deterministic",
-                "GEFS (NCEP/American)": "GFS Deterministic"
-            }
-            target_name = det_name_map[model_choice]
-            var_keys = [k for k in daily_det.keys() if k.startswith(variable)]
-            if var_keys:
-                det_lines[target_name] = daily_det[var_keys[0]]
+        k_aifs = [k for k in daily_det.keys() if k.startswith(variable) and "aifs" in k]
+        if k_aifs: det_lines["AIFS Deterministic"] = daily_det[k_aifs[0]]
+        
+        k_ifs = [k for k in daily_det.keys() if k.startswith(variable) and "ifs" in k and "aifs" not in k]
+        if k_ifs: det_lines["IFS Deterministic"] = daily_det[k_ifs[0]]
+        
+        k_gfs = [k for k in daily_det.keys() if k.startswith(variable) and "gfs" in k]
+        if k_gfs: det_lines["GFS Deterministic"] = daily_det[k_gfs[0]]
+        
+        k_nbm = [k for k in daily_det.keys() if k.startswith(variable) and "nbm" in k]
+        if k_nbm: det_lines["NBM (US Only)"] = daily_det[k_nbm[0]]
 
 
-        # --- The Expected Forecast Readout (Table) ---
+        # --- The Expected Forecast Readout (Always Static Table) ---
         st.markdown("---")
-        st.markdown(f"### 📅 15-Day Expected Forecast ({model_choice})")
+        st.markdown(f"### 📅 15-Day Expected Forecast (All Models)")
         st.caption(f"Data dynamically fetched from Open-Meteo on: **{fetch_time}**")
         
-        if is_super:
-            aifs_cols = [c for c in member_columns if "aifs" in c]
-            ifs_cols = [c for c in member_columns if "ifs" in c and "aifs" not in c]
-            gefs_cols = [c for c in member_columns if "gfs" in c or "gefs" in c]
+        readout_data = {
+            f"AIFS Ens Median ({unit})": df["AIFS Median"].round(1),
+            f"IFS Ens Median ({unit})": df["IFS Median"].round(1),
+            f"GEFS Ens Median ({unit})": df["GEFS Median"].round(1),
+        }
+        
+        if "NBM (US Only)" in det_lines:
+            nbm_vals = det_lines["NBM (US Only)"]
+            nbm_series = pd.Series(nbm_vals)
+            nbm_series.index = df.index[:len(nbm_series)] 
+            nbm_series = nbm_series.reindex(df.index)
+            readout_data[f"NBM Deterministic ({unit})"] = nbm_series.round(1)
             
-            if not gefs_cols:
-                assigned = set(aifs_cols + ifs_cols)
-                gefs_cols = [c for c in member_columns if c not in assigned]
-            
-            df["AIFS Median"] = df[aifs_cols].median(axis=1)
-            df["IFS Median"] = df[ifs_cols].median(axis=1)
-            df["GEFS Median"] = df[gefs_cols].median(axis=1)
-            
-            readout_data = {
-                f"AIFS Ens Median ({unit})": df["AIFS Median"].round(1),
-                f"IFS Ens Median ({unit})": df["IFS Median"].round(1),
-                f"GEFS Ens Median ({unit})": df["GEFS Median"].round(1),
-            }
-            
-            # Inject NBM into the table using Pandas to safely align lengths
-            if "NBM (US Only)" in det_lines:
-                nbm_vals = det_lines["NBM (US Only)"]
-                nbm_series = pd.Series(nbm_vals)
-                nbm_series.index = df.index[:len(nbm_series)] 
-                nbm_series = nbm_series.reindex(df.index)
-                readout_data[f"NBM Deterministic ({unit})"] = nbm_series.round(1)
-                
-            readout_data[f"Superensemble Median ({unit})"] = df["ensemble_median"].round(1)
-            
-        else:
-            readout_data = {
-                f"Expected Ens Median {display_name} ({unit})": df["ensemble_median"].round(1)
-            }
+        readout_data[f"Superensemble Median ({unit})"] = df["ensemble_median"].round(1)
             
         readout_df = pd.DataFrame(readout_data)
         readout_df.index = df.index.strftime('%b %d')
         readout_df = readout_df.T 
         st.dataframe(readout_df, use_container_width=True)
 
-        # Reshape ensemble data for the Box Plot
-        df_melted = df.reset_index().melt(
-            id_vars=['time'], 
-            value_vars=member_columns, 
-            var_name='Member', 
-            value_name='Value'
-        )
+        # --- DYNAMIC PLOTTING & CALCULATION PREP ---
+        # Build list of active ensemble columns based on checkboxes
+        active_members = []
+        if show_aifs_ens: active_members.extend(aifs_cols)
+        if show_ifs_ens: active_members.extend(ifs_cols)
+        if show_gefs_ens: active_members.extend(gefs_cols)
 
         # --- PLOT 1: The Box Plot ---
         fig = go.Figure()
 
-        # Background Spread
-        fig.add_trace(go.Box(
-            x=df_melted['time'],
-            y=df_melted['Value'],
-            name='Ensemble Spread',
-            marker_color='steelblue',
-            boxpoints='outliers',
-            line=dict(width=1.5)
-        ))
+        # Background Spread (Only if there are active members)
+        if active_members:
+            df_melted = df.reset_index().melt(
+                id_vars=['time'], 
+                value_vars=active_members, 
+                var_name='Member', 
+                value_name='Value'
+            )
+            fig.add_trace(go.Box(
+                x=df_melted['time'],
+                y=df_melted['Value'],
+                name='Ensemble Spread',
+                marker_color='steelblue',
+                boxpoints='outliers',
+                line=dict(width=1.5)
+            ))
 
         super_colors = {
             "AIFS Deterministic": "darkviolet", 
@@ -245,21 +223,29 @@ if st.session_state.data_loaded:
             "NBM (US Only)": "black"
         }
 
-        # Deterministic Lines
+        # Toggle Map for Deterministic Lines
+        det_toggles = {
+            "AIFS Deterministic": show_aifs_det,
+            "IFS Deterministic": show_ifs_det,
+            "GFS Deterministic": show_gfs_det,
+            "NBM (US Only)": show_nbm
+        }
+
+        # Deterministic Lines (Only plot if checked)
         for name, data_array in det_lines.items():
-            color = "black" if not is_super else super_colors.get(name, "black")
-            
-            fig.add_trace(go.Scatter(
-                x=df.index[:len(data_array)], 
-                y=data_array, 
-                mode='lines+markers',
-                line=dict(color=color, width=2.5),
-                marker=dict(size=6),
-                name=name
-            ))
+            if det_toggles.get(name, False):
+                color = super_colors.get(name, "black")
+                fig.add_trace(go.Scatter(
+                    x=df.index[:len(data_array)], 
+                    y=data_array, 
+                    mode='lines+markers',
+                    line=dict(color=color, width=2.5),
+                    marker=dict(size=6),
+                    name=name
+                ))
 
         fig.update_layout(
-            title=f"Forecast Spread vs Deterministic Runs: {display_name}<br><sup>Lat: {lat}, Lon: {lon} | Members Used: {len(member_columns)}</sup>",
+            title=f"Forecast Spread vs Deterministic Runs: {display_name}<br><sup>Lat: {lat}, Lon: {lon} | Members Active: {len(active_members)}</sup>",
             xaxis_title="Date",
             yaxis_title=f"Value ({unit})",
             hovermode="x unified",
@@ -271,7 +257,7 @@ if st.session_state.data_loaded:
         
         # --- Threshold Probability Calculator ---
         st.markdown("---")
-        st.markdown(f"### 📊 Threshold Probability Calculator ({len(member_columns)} Members)")
+        st.markdown(f"### 📊 Threshold Probability Calculator ({len(active_members)} Active Members)")
         
         col1, col2 = st.columns(2)
         with col1:
@@ -280,13 +266,19 @@ if st.session_state.data_loaded:
         with col2:
             condition = st.selectbox("Condition", ["Greater than or equal to (≥)", "Less than or equal to (≤)"])
 
-        total_members = len(member_columns)
-        if "Greater" in condition:
-            probabilities = (df[member_columns] >= threshold).sum(axis=1) / total_members * 100
-            operator_symbol = "≥"
+        total_members = len(active_members)
+        
+        # Safe math to prevent ZeroDivisionError if user unchecks all ensembles
+        if total_members > 0:
+            if "Greater" in condition:
+                probabilities = (df[active_members] >= threshold).sum(axis=1) / total_members * 100
+                operator_symbol = "≥"
+            else:
+                probabilities = (df[active_members] <= threshold).sum(axis=1) / total_members * 100
+                operator_symbol = "≤"
         else:
-            probabilities = (df[member_columns] <= threshold).sum(axis=1) / total_members * 100
-            operator_symbol = "≤"
+            probabilities = pd.Series(0, index=df.index)
+            operator_symbol = "≥" if "Greater" in condition else "≤"
 
         fig_prob = go.Figure()
         fig_prob.add_trace(go.Bar(

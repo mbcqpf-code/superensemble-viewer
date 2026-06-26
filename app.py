@@ -75,7 +75,7 @@ show_gfs_det = st.sidebar.checkbox("GFS Operational", value=True)
 show_nbm = st.sidebar.checkbox("NBM (US Only)", value=True)
 
 
-# --- CACHE: Hardcoded for Superensemble fetching ---
+# --- CACHE: Fetching both Daily and Hourly simultaneously ---
 @st.cache_data(ttl=3600, show_spinner="Fetching ensemble and deterministic data...")
 def get_weather_data(lat, lon, var):
     base_params = {
@@ -94,9 +94,11 @@ def get_weather_data(lat, lon, var):
     ens_response = requests.get("https://ensemble-api.open-meteo.com/v1/ensemble", params=ens_params)
     ens_response.raise_for_status()
     
-    # 2. Fetch All Deterministic Runs
+    # 2. Fetch All Deterministic Runs (Injecting hourly for Diurnal correction)
+    hourly_var = "temperature_2m" if "temperature" in var else "precipitation"
     det_params = base_params.copy()
     det_params["models"] = "ecmwf_aifs025_single,ecmwf_ifs025,gfs_seamless,ncep_nbm_conus"
+    det_params["hourly"] = hourly_var 
     det_response = requests.get("https://api.open-meteo.com/v1/forecast", params=det_params)
     det_response.raise_for_status()
     
@@ -111,7 +113,53 @@ if st.sidebar.button("Generate Forecast", type="primary", use_container_width=Tr
 if st.session_state.data_loaded:
     try:
         ens_data, det_data, fetch_time = get_weather_data(lat, lon, variable)
+        
+        # --- NEW: DIURNAL CORRECTION ENGINE FOR AIFS ---
+        if variable == "temperature_2m_max" and "hourly" in det_data:
+            h_data = det_data["hourly"]
+            df_h = pd.DataFrame({"local_time": pd.to_datetime(h_data["time"])})
+            utc_offset = det_data.get("utc_offset_seconds", 0)
+            df_h["utc_time"] = df_h["local_time"] - pd.to_timedelta(utc_offset, unit='s')
+            df_h["local_date"] = df_h["local_time"].dt.floor('D')
 
+            # Populate hourly columns
+            for k, v in h_data.items():
+                if k != "time":
+                    df_h[k] = pd.to_numeric(v, errors='coerce')
+
+            # Identify High-Res models
+            ifs_cols = [c for c in h_data.keys() if "ifs" in c and "aifs" not in c]
+            gfs_cols = [c for c in h_data.keys() if "gfs" in c]
+            nbm_cols = [c for c in h_data.keys() if "nbm" in c]
+
+            deltas = []
+            # Calculate True Max vs Synoptic (00z/06z/12z/18z) Max
+            for col_list in [ifs_cols, gfs_cols, nbm_cols]:
+                if col_list and col_list[0] in df_h.columns:
+                    c = col_list[0]
+                    true_max = df_h.groupby("local_date")[c].max()
+                    synoptic_max = df_h[df_h["utc_time"].dt.hour.isin([0, 6, 12, 18])].groupby("local_date")[c].max()
+                    deltas.append(true_max - synoptic_max)
+
+            if deltas:
+                # Average the corrections from all available high-res models
+                avg_delta = pd.concat(deltas, axis=1).mean(axis=1)
+                daily_dates = pd.to_datetime(ens_data["daily"]["time"])
+                aligned_delta = daily_dates.map(avg_delta).fillna(0)
+
+                # Correct AIFS Ensemble members
+                for k in ens_data["daily"].keys():
+                    if "aifs" in k and k.startswith(variable):
+                        orig = pd.Series(ens_data["daily"][k])
+                        ens_data["daily"][k] = (orig + aligned_delta).tolist()
+
+                # Correct AIFS Deterministic run
+                if "daily" in det_data:
+                    for k in det_data["daily"].keys():
+                        if "aifs" in k and k.startswith(variable):
+                            orig = pd.Series(det_data["daily"][k])
+                            det_data["daily"][k] = (orig + aligned_delta).tolist()
+                            
         # --- PROCESS ENSEMBLE DATA ---
         daily_ens = ens_data["daily"]
         df = pd.DataFrame({"time": pd.to_datetime(daily_ens["time"])})
@@ -166,8 +214,12 @@ if st.session_state.data_loaded:
 
         # --- The Expected Forecast Readout (Always Static Table) ---
         st.markdown("---")
-        st.markdown(f"### 📅 15-Day Expected Forecast (All Models)")
-        st.caption(f"Data dynamically fetched from Open-Meteo on: **{fetch_time}**")
+        if variable == "temperature_2m_max":
+            st.markdown(f"### 📅 15-Day Expected Forecast (All Models) 🛠️")
+            st.caption(f"Data dynamically fetched from Open-Meteo on: **{fetch_time}** |  *🛠️ AIFS Max Temperatures have been dynamically corrected for diurnal heating using high-res models.*")
+        else:
+            st.markdown(f"### 📅 15-Day Expected Forecast (All Models)")
+            st.caption(f"Data dynamically fetched from Open-Meteo on: **{fetch_time}**")
         
         readout_data = {
             f"AIFS Ens Median ({unit})": df["AIFS Median"].round(1),

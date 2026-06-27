@@ -69,7 +69,7 @@ st.sidebar.header("⚙️ Forecast Settings")
 
 variable = st.sidebar.selectbox(
     "Weather Variable",
-    ["temperature_2m_max", "temperature_2m_min", "precipitation_sum"],
+    ["temperature_2m_max", "apparent_temperature_max", "temperature_2m_min", "precipitation_sum"],
     format_func=lambda x: x.replace("_", " ").title()
 )
 
@@ -108,8 +108,14 @@ def get_weather_data(lat, lon, var):
     ens_response = requests.get("https://ensemble-api.open-meteo.com/v1/ensemble", params=ens_params)
     ens_response.raise_for_status()
     
-    # 2. Fetch All Deterministic Runs (UPDATED: ecmwf_ifs at native 9km)
-    hourly_var = "temperature_2m" if "temperature" in var else "precipitation"
+    # 2. Fetch All Deterministic Runs
+    if "apparent_temperature" in var:
+        hourly_var = "apparent_temperature"
+    elif "temperature" in var:
+        hourly_var = "temperature_2m"
+    else:
+        hourly_var = "precipitation"
+        
     det_params = base_params.copy()
     det_params["models"] = "ecmwf_aifs025_single,ecmwf_ifs,gfs_seamless,ncep_nbm_conus"
     det_params["hourly"] = hourly_var 
@@ -129,7 +135,7 @@ if st.session_state.data_loaded:
         ens_data, det_data, fetch_time = get_weather_data(lat, lon, variable)
         
         # --- DIURNAL CORRECTION ENGINE FOR AIFS ---
-        if variable == "temperature_2m_max" and "hourly" in det_data:
+        if variable in ["temperature_2m_max", "apparent_temperature_max"] and "hourly" in det_data:
             h_data = det_data["hourly"]
             df_h = pd.DataFrame({"local_time": pd.to_datetime(h_data["time"])})
             utc_offset = det_data.get("utc_offset_seconds", 0)
@@ -221,7 +227,7 @@ if st.session_state.data_loaded:
 
         # --- The Expected Forecast Readout (Always Static Table) ---
         st.markdown("---")
-        if variable == "temperature_2m_max":
+        if variable in ["temperature_2m_max", "apparent_temperature_max"]:
             st.markdown(f"### 📅 15-Day Expected Forecast (All Models) 🛠️")
             st.caption(f"Data dynamically fetched from Open-Meteo on: **{fetch_time}** |  *🛠️ AIFS Max Temperatures have been dynamically corrected for diurnal heating using high-res models.*")
         else:

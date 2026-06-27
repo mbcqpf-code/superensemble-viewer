@@ -20,6 +20,20 @@ if "lon" not in st.session_state:
 st.title("🌤️ Open-Meteo Superensemble Viewer")
 st.markdown("Compare the world's top weather models or combine them into a massive Superensemble.")
 
+# --- DATA EXPLANATION TAB ---
+with st.expander("ℹ️ Understanding the Data & Model Resolutions"):
+    st.markdown("""
+    **Temporal Resolution & Daily Aggregations**
+    Open-Meteo calculates daily maximums, minimums, and precipitation sums by extracting the highest/lowest values from a 24-hour block of hourly data. The accuracy of this peak depends on the model's native output frequency:
+    * **IFS (9km HRES) & NBM:** Highly accurate. They output data natively at 1-hourly and 3-hourly intervals, easily capturing the exact afternoon diurnal heating peak.
+    * **GEFS & IFS Ensembles:** Output at 3-hourly intervals, providing a very close approximation of true daily extremes.
+    
+    **The AIFS Diurnal Correction**
+    The ECMWF AIFS (Artificial Intelligence Forecasting System) outputs data strictly at 6-hour intervals (00z, 06z, 12z, 18z). Because this completely skips the peak afternoon heating window (typically 20z-22z), the raw AIFS data often exhibits a mathematically artificial "cool bias." 
+    
+    *🛠️ **How we fix it:** This dashboard features a custom diurnal correction engine. It calculates the exact shape of the afternoon heating curve from the high-res deterministic models (NBM, IFS, GFS) for each specific day, extracts the missing delta, and dynamically applies it to the AIFS members to reconstruct the true physical high.*
+    """)
+
 # 2. Create the Sidebar for User Inputs
 st.sidebar.header("🗺️ Forecast Location")
 st.sidebar.markdown("Click the map to drop a pin, or enter exact coordinates below.")
@@ -59,7 +73,7 @@ variable = st.sidebar.selectbox(
     format_func=lambda x: x.replace("_", " ").title()
 )
 
-# --- NEW: Checkbox Toggles ---
+# --- Checkbox Toggles ---
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🎛️ Plot Display Toggles")
 
@@ -94,10 +108,10 @@ def get_weather_data(lat, lon, var):
     ens_response = requests.get("https://ensemble-api.open-meteo.com/v1/ensemble", params=ens_params)
     ens_response.raise_for_status()
     
-    # 2. Fetch All Deterministic Runs (Injecting hourly for Diurnal correction)
+    # 2. Fetch All Deterministic Runs (UPDATED: ecmwf_ifs at native 9km)
     hourly_var = "temperature_2m" if "temperature" in var else "precipitation"
     det_params = base_params.copy()
-    det_params["models"] = "ecmwf_aifs025_single,ecmwf_ifs025,gfs_seamless,ncep_nbm_conus"
+    det_params["models"] = "ecmwf_aifs025_single,ecmwf_ifs,gfs_seamless,ncep_nbm_conus"
     det_params["hourly"] = hourly_var 
     det_response = requests.get("https://api.open-meteo.com/v1/forecast", params=det_params)
     det_response.raise_for_status()
@@ -114,7 +128,7 @@ if st.session_state.data_loaded:
     try:
         ens_data, det_data, fetch_time = get_weather_data(lat, lon, variable)
         
-        # --- NEW: DIURNAL CORRECTION ENGINE FOR AIFS ---
+        # --- DIURNAL CORRECTION ENGINE FOR AIFS ---
         if variable == "temperature_2m_max" and "hourly" in det_data:
             h_data = det_data["hourly"]
             df_h = pd.DataFrame({"local_time": pd.to_datetime(h_data["time"])})
@@ -122,18 +136,15 @@ if st.session_state.data_loaded:
             df_h["utc_time"] = df_h["local_time"] - pd.to_timedelta(utc_offset, unit='s')
             df_h["local_date"] = df_h["local_time"].dt.floor('D')
 
-            # Populate hourly columns
             for k, v in h_data.items():
                 if k != "time":
                     df_h[k] = pd.to_numeric(v, errors='coerce')
 
-            # Identify High-Res models
             ifs_cols = [c for c in h_data.keys() if "ifs" in c and "aifs" not in c]
             gfs_cols = [c for c in h_data.keys() if "gfs" in c]
             nbm_cols = [c for c in h_data.keys() if "nbm" in c]
 
             deltas = []
-            # Calculate True Max vs Synoptic (00z/06z/12z/18z) Max
             for col_list in [ifs_cols, gfs_cols, nbm_cols]:
                 if col_list and col_list[0] in df_h.columns:
                     c = col_list[0]
@@ -142,18 +153,15 @@ if st.session_state.data_loaded:
                     deltas.append(true_max - synoptic_max)
 
             if deltas:
-                # Average the corrections from all available high-res models
                 avg_delta = pd.concat(deltas, axis=1).mean(axis=1)
                 daily_dates = pd.to_datetime(ens_data["daily"]["time"])
                 aligned_delta = daily_dates.map(avg_delta).fillna(0)
 
-                # Correct AIFS Ensemble members
                 for k in ens_data["daily"].keys():
                     if "aifs" in k and k.startswith(variable):
                         orig = pd.Series(ens_data["daily"][k])
                         ens_data["daily"][k] = (orig + aligned_delta).tolist()
 
-                # Correct AIFS Deterministic run
                 if "daily" in det_data:
                     for k in det_data["daily"].keys():
                         if "aifs" in k and k.startswith(variable):
@@ -190,7 +198,6 @@ if st.session_state.data_loaded:
             assigned = set(aifs_cols + ifs_cols)
             gefs_cols = [c for c in member_columns if c not in assigned]
         
-        # Calculate base medians for the table
         df["AIFS Median"] = df[aifs_cols].median(axis=1)
         df["IFS Median"] = df[ifs_cols].median(axis=1)
         df["GEFS Median"] = df[gefs_cols].median(axis=1)
@@ -242,7 +249,6 @@ if st.session_state.data_loaded:
         st.dataframe(readout_df, use_container_width=True)
 
         # --- DYNAMIC PLOTTING & CALCULATION PREP ---
-        # Build list of active ensemble columns based on checkboxes
         active_members = []
         if show_aifs_ens: active_members.extend(aifs_cols)
         if show_ifs_ens: active_members.extend(ifs_cols)
@@ -251,7 +257,6 @@ if st.session_state.data_loaded:
         # --- PLOT 1: The Box Plot ---
         fig = go.Figure()
 
-        # Background Spread (Only if there are active members)
         if active_members:
             df_melted = df.reset_index().melt(
                 id_vars=['time'], 
@@ -275,7 +280,6 @@ if st.session_state.data_loaded:
             "NBM (US Only)": "black"
         }
 
-        # Toggle Map for Deterministic Lines
         det_toggles = {
             "AIFS Deterministic": show_aifs_det,
             "IFS Deterministic": show_ifs_det,
@@ -283,7 +287,6 @@ if st.session_state.data_loaded:
             "NBM (US Only)": show_nbm
         }
 
-        # Deterministic Lines (Only plot if checked)
         for name, data_array in det_lines.items():
             if det_toggles.get(name, False):
                 color = super_colors.get(name, "black")
@@ -320,7 +323,6 @@ if st.session_state.data_loaded:
 
         total_members = len(active_members)
         
-        # Safe math to prevent ZeroDivisionError if user unchecks all ensembles
         if total_members > 0:
             if "Greater" in condition:
                 probabilities = (df[active_members] >= threshold).sum(axis=1) / total_members * 100

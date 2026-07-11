@@ -366,3 +366,4 @@ if st.session_state.data_loaded:
         st.error(f"Failed to fetch or process data: {e}")
 else:
     st.info("👈 Use the map or text boxes in the sidebar to select your location, then click 'Generate Forecast' to start.")
+

@@ -137,14 +137,18 @@ if st.session_state.data_loaded:
         # --- DIURNAL CORRECTION ENGINE FOR AIFS ---
         if variable in ["temperature_2m_max", "apparent_temperature_max"] and "hourly" in det_data:
             h_data = det_data["hourly"]
-            df_h = pd.DataFrame({"local_time": pd.to_datetime(h_data["time"])})
+            
+            # MEMORY FIX: Build a dictionary first to avoid fragmentation
+            h_dict = {"local_time": pd.to_datetime(h_data["time"])}
+            for k, v in h_data.items():
+                if k != "time":
+                    h_dict[k] = pd.to_numeric(v, errors='coerce')
+                    
+            df_h = pd.DataFrame(h_dict)
+            
             utc_offset = det_data.get("utc_offset_seconds", 0)
             df_h["utc_time"] = df_h["local_time"] - pd.to_timedelta(utc_offset, unit='s')
             df_h["local_date"] = df_h["local_time"].dt.floor('D')
-
-            for k, v in h_data.items():
-                if k != "time":
-                    df_h[k] = pd.to_numeric(v, errors='coerce')
 
             ifs_cols = [c for c in h_data.keys() if "ifs" in c and "aifs" not in c]
             gfs_cols = [c for c in h_data.keys() if "gfs" in c]
@@ -176,13 +180,15 @@ if st.session_state.data_loaded:
                             
         # --- PROCESS ENSEMBLE DATA ---
         daily_ens = ens_data["daily"]
-        df = pd.DataFrame({"time": pd.to_datetime(daily_ens["time"])})
-        df.set_index("time", inplace=True)
-
         member_columns = [col for col in daily_ens.keys() if col.startswith(variable)]
 
+        # MEMORY FIX: Build a dictionary of columns to construct DataFrame cleanly
+        ens_dict = {"time": pd.to_datetime(daily_ens["time"])}
         for col in member_columns:
-            df[col] = daily_ens[col]
+            ens_dict[col] = daily_ens[col]
+            
+        df = pd.DataFrame(ens_dict)
+        df.set_index("time", inplace=True)
 
         df["ensemble_median"] = df[member_columns].median(axis=1)
 
@@ -204,6 +210,7 @@ if st.session_state.data_loaded:
             assigned = set(aifs_cols + ifs_cols)
             gefs_cols = [c for c in member_columns if c not in assigned]
         
+        # Calculate medians cleanly on the unfragmented DataFrame
         df["AIFS Median"] = df[aifs_cols].median(axis=1)
         df["IFS Median"] = df[ifs_cols].median(axis=1)
         df["GEFS Median"] = df[gefs_cols].median(axis=1)
@@ -252,6 +259,8 @@ if st.session_state.data_loaded:
         readout_df = pd.DataFrame(readout_data)
         readout_df.index = df.index.strftime('%b %d')
         readout_df = readout_df.T 
+        
+        # Suppress deprecation warning by swapping `use_container_width` with `width='stretch'` (if supported locally) or retaining for backward compatibility.
         st.dataframe(readout_df, use_container_width=True)
 
         # --- DYNAMIC PLOTTING & CALCULATION PREP ---
@@ -366,4 +375,3 @@ if st.session_state.data_loaded:
         st.error(f"Failed to fetch or process data: {e}")
 else:
     st.info("👈 Use the map or text boxes in the sidebar to select your location, then click 'Generate Forecast' to start.")
-

@@ -75,6 +75,13 @@ variable = st.sidebar.selectbox(
 
 # --- Checkbox Toggles ---
 st.sidebar.markdown("---")
+
+# NEW: Cumulative Precip Toggle
+cumulative_precip = False
+if variable == "precipitation_sum":
+    cumulative_precip = st.sidebar.checkbox("💧 Show Cumulative (Running Total)", value=False)
+    st.sidebar.markdown("---")
+
 st.sidebar.markdown("### 🎛️ Plot Display Toggles")
 
 st.sidebar.markdown("**Ensembles (Box Plots)**")
@@ -231,6 +238,17 @@ if st.session_state.data_loaded:
         k_nbm = [k for k in daily_det.keys() if k.startswith(variable) and "nbm" in k]
         if k_nbm: det_lines["NBM (US Only)"] = daily_det[k_nbm[0]]
 
+        # --- NEW: APPLY CUMULATIVE SUM IF REQUESTED ---
+        if variable == "precipitation_sum" and cumulative_precip:
+            # Sum down the columns (axis=0) to build a running total over the 15 days
+            df = df.cumsum(axis=0)
+            
+            # Apply the same running total to the deterministic lines
+            for k in det_lines.keys():
+                det_lines[k] = pd.Series(det_lines[k]).cumsum().tolist()
+                
+            display_name = "Cumulative Precipitation"
+
 
         # --- The Expected Forecast Readout (Always Static Table) ---
         st.markdown("---")
@@ -242,9 +260,9 @@ if st.session_state.data_loaded:
             st.caption(f"Data dynamically fetched from Open-Meteo on: **{fetch_time}**")
         
         readout_data = {
-            f"AIFS Ens Median ({unit})": df["AIFS Median"].round(1),
-            f"IFS Ens Median ({unit})": df["IFS Median"].round(1),
-            f"GEFS Ens Median ({unit})": df["GEFS Median"].round(1),
+            f"AIFS Ens Median ({unit})": df["AIFS Median"].round(2),
+            f"IFS Ens Median ({unit})": df["IFS Median"].round(2),
+            f"GEFS Ens Median ({unit})": df["GEFS Median"].round(2),
         }
         
         if "NBM (US Only)" in det_lines:
@@ -252,9 +270,9 @@ if st.session_state.data_loaded:
             nbm_series = pd.Series(nbm_vals)
             nbm_series.index = df.index[:len(nbm_series)] 
             nbm_series = nbm_series.reindex(df.index)
-            readout_data[f"NBM Deterministic ({unit})"] = nbm_series.round(1)
+            readout_data[f"NBM Deterministic ({unit})"] = nbm_series.round(2)
             
-        readout_data[f"Superensemble Median ({unit})"] = df["ensemble_median"].round(1)
+        readout_data[f"Superensemble Median ({unit})"] = df["ensemble_median"].round(2)
             
         readout_df = pd.DataFrame(readout_data)
         readout_df.index = df.index.strftime('%b %d')

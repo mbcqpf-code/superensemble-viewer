@@ -101,7 +101,7 @@ show_nbm = st.sidebar.checkbox("NBM (US Only)", value=True)
 
 # --- CACHE: Fetching both Daily and Hourly simultaneously ---
 @st.cache_data(ttl=3600, show_spinner="Fetching ensemble and deterministic data...")
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=10)) # Auto-retry to beat rate limits
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=10))
 def get_weather_data(lat, lon, var):
     base_params = {
         "latitude": lat,
@@ -117,7 +117,6 @@ def get_weather_data(lat, lon, var):
     ens_params = base_params.copy()
     ens_params["models"] = "ecmwf_aifs025_ensemble,ecmwf_ifs025_ensemble,gfs_seamless"
     
-    # If precipitation is selected, we MUST grab the hourly data to build custom 12z-12z sums
     if var == "precipitation_sum":
         ens_params["hourly"] = "precipitation"
         
@@ -193,10 +192,9 @@ if st.session_state.data_loaded:
                             orig = pd.Series(det_data["daily"][k])
                             det_data["daily"][k] = (orig + aligned_delta).tolist()
 
-        # --- NEW: CUSTOM 12Z-12Z PRECIPITATION AGGREGATION ---
+        # --- CUSTOM 12Z-12Z PRECIPITATION AGGREGATION ---
         if variable == "precipitation_sum" and "hourly" in ens_data and "hourly" in det_data:
             
-            # 1. Aggregate Ensemble Hourly to 12z-12z
             ens_h = ens_data["hourly"]
             ens_h_dict = {"local_time": pd.to_datetime(ens_h["time"])}
             for k, v in ens_h.items():
@@ -205,18 +203,14 @@ if st.session_state.data_loaded:
             
             utc_offset = ens_data.get("utc_offset_seconds", 0)
             df_ens_h["utc_time"] = df_ens_h["local_time"] - pd.to_timedelta(utc_offset, unit='s')
-            
-            # Shift back 12 hours so that 12Z-12Z falls neatly onto the starting date
             df_ens_h["12z_date"] = (df_ens_h["utc_time"] - pd.Timedelta(hours=12)).dt.floor('D')
             ens_12z_sums = df_ens_h.groupby("12z_date").sum(numeric_only=True)
             
-            # Overwrite the native API arrays with our custom 12z calculations
             daily_ens_new = {"time": ens_12z_sums.index.strftime('%Y-%m-%d').tolist()}
             for col in ens_12z_sums.columns:
                 daily_ens_new[col.replace("precipitation", "precipitation_sum")] = ens_12z_sums[col].tolist()
             ens_data["daily"] = daily_ens_new
             
-            # 2. Aggregate Deterministic Hourly to 12z-12z
             det_h = det_data["hourly"]
             det_h_dict = {"local_time": pd.to_datetime(det_h["time"])}
             for k, v in det_h.items():
@@ -225,7 +219,6 @@ if st.session_state.data_loaded:
             
             df_det_h["utc_time"] = df_det_h["local_time"] - pd.to_timedelta(utc_offset, unit='s')
             df_det_h["12z_date"] = (df_det_h["utc_time"] - pd.Timedelta(hours=12)).dt.floor('D')
-            
             det_12z_sums = df_det_h.groupby("12z_date").sum(numeric_only=True)
             
             daily_det_new = {"time": det_12z_sums.index.strftime('%Y-%m-%d').tolist()}
@@ -244,8 +237,6 @@ if st.session_state.data_loaded:
             
         df = pd.DataFrame(ens_dict)
         df.set_index("time", inplace=True)
-
-        df["ensemble_median"] = df[member_columns].median(axis=1)
 
         unit = ""
         if "daily_units" in ens_data:
@@ -266,10 +257,6 @@ if st.session_state.data_loaded:
         if not gefs_cols:
             assigned = set(aifs_cols + ifs_cols)
             gefs_cols = [c for c in member_columns if c not in assigned]
-        
-        df["AIFS Median"] = df[aifs_cols].median(axis=1)
-        df["IFS Median"] = df[ifs_cols].median(axis=1)
-        df["GEFS Median"] = df[gefs_cols].median(axis=1)
 
         # --- PROCESS DETERMINISTIC DATA ---
         daily_det = det_data["daily"]
@@ -287,12 +274,19 @@ if st.session_state.data_loaded:
         k_nbm = [k for k in daily_det.keys() if k.startswith(variable) and "nbm" in k]
         if k_nbm: det_lines["NBM (US Only)"] = daily_det[k_nbm[0]]
 
-        # --- APPLY CUMULATIVE SUM IF REQUESTED ---
+        # --- CUMULATIVE SUM ENGINE (APPLIED BEFORE MEDIAN CALCULATIONS) ---
         if variable == "precipitation_sum" and cumulative_precip:
-            df = df.cumsum(axis=0)
+            # Cumsum raw member columns FIRST
+            df[member_columns] = df[member_columns].cumsum(axis=0)
             for k in det_lines.keys():
                 det_lines[k] = pd.Series(det_lines[k]).cumsum().tolist()
             display_name = "Cumulative Precipitation (12Z to 12Z)"
+
+        # --- CALCULATE MEDIANS (Accurate for both daily & cumulative) ---
+        df["ensemble_median"] = df[member_columns].median(axis=1)
+        df["AIFS Median"] = df[aifs_cols].median(axis=1)
+        df["IFS Median"] = df[ifs_cols].median(axis=1)
+        df["GEFS Median"] = df[gefs_cols].median(axis=1)
 
 
         # --- The Expected Forecast Readout (Always Static Table) ---
@@ -321,7 +315,6 @@ if st.session_state.data_loaded:
             
         readout_df = pd.DataFrame(readout_data)
         
-        # When 12Z-12Z is active, tweak the date header format slightly for clarity
         if variable == "precipitation_sum":
             readout_df.index = df.index.strftime('%b %d (12z)')
         else:

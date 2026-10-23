@@ -27,13 +27,13 @@ with st.expander("ℹ️ Understanding the Data & Model Resolutions"):
     **Temporal Resolution & Daily Aggregations**
     Open-Meteo calculates daily maximums, minimums, and precipitation/snow sums by extracting the highest/lowest or accumulated values from hourly data. The accuracy of this peak depends on the model's native output frequency:
     * **IFS (9km HRES) & NBM:** Highly accurate. They output data natively at 1-hourly and 3-hourly intervals, easily capturing the exact diurnal heating peak.
-    * **GEFS & IFS Ensembles:** Output at 3-hourly intervals, providing a very close approximation of true daily extremes.
-    * **WeatherNext 2 (Google AI):** 64-member global AI ensemble operating at 0.25° resolution with 6-hourly temporal steps.
+    * **GEFS & IFS Ensembles:** Output at 3-hourly intervals, providing a close approximation of true daily extremes.
+    * **AIFS & WeatherNext 2:** Global AI models operating at 0.25° resolution with 6-hourly temporal steps (00z, 06z, 12z, 18z).
     
-    **The AIFS Diurnal Correction**
-    The ECMWF AIFS outputs data strictly at 6-hour intervals (00z, 06z, 12z, 18z). Because this skips the peak afternoon heating window (typically 20z-22z), raw AIFS daytime highs exhibit a cool bias.
+    **The AI Diurnal Heating Correction (AIFS & WeatherNext 2)**
+    Because 6-hourly output skips the peak afternoon heating window (typically 20z-22z), raw daily high temperatures from 6-hourly AI models exhibit a systemic cool bias.
     
-    *🛠️ **How we fix it:** This dashboard features a custom diurnal correction engine. It calculates the shape of the afternoon heating curve from high-res models (NBM, IFS, GFS), extracts the missing delta, and dynamically applies it to AIFS maximum temperatures.*
+    *🛠️ **How we fix it:** This dashboard applies a dynamic diurnal correction engine to maximum temperatures. It samples the shape of the afternoon heating curve from high-resolution deterministic models (NBM, IFS, GFS), extracts the missing sub-synoptic delta, and dynamically restores peak afternoon temperatures for both AIFS and WeatherNext 2.*
     
     **Hydrologic Timing (12Z to 12Z)**
     *While Temperature variables are calculated midnight-to-midnight (Local Time), Precipitation and Snowfall are custom-aggregated from 12Z to 12Z to match standard operational hydrologic cycles.*
@@ -123,7 +123,7 @@ def get_weather_data(lat, lon, var):
         "forecast_days": 15
     }
     
-    # 1. Fetch All Ensembles (including WeatherNext 2)
+    # 1. Fetch All Ensembles
     ens_params = base_params.copy()
     ens_params["models"] = "ecmwf_aifs025_ensemble,ecmwf_ifs025_ensemble,gfs_seamless,google_weathernext2_ensemble"
     
@@ -162,7 +162,7 @@ if st.session_state.data_loaded:
     try:
         ens_data, det_data, fetch_time = get_weather_data(lat, lon, variable)
         
-        # --- DIURNAL CORRECTION ENGINE FOR AIFS (Max Temp Only) ---
+        # --- DIURNAL CORRECTION ENGINE (AIFS & WEATHERNEXT 2 MAX TEMPS) ---
         if variable in ["temperature_2m_max", "apparent_temperature_max"] and "hourly" in det_data:
             h_data = det_data["hourly"]
             
@@ -194,11 +194,13 @@ if st.session_state.data_loaded:
                 daily_dates = pd.to_datetime(ens_data["daily"]["time"])
                 aligned_delta = daily_dates.map(avg_delta).fillna(0)
 
+                # Correct both AIFS and WeatherNext 2 ensemble members
                 for k in ens_data["daily"].keys():
-                    if "aifs" in k and k.startswith(variable):
+                    if ("aifs" in k or "weathernext" in k) and k.startswith(variable):
                         orig = pd.Series(ens_data["daily"][k])
                         ens_data["daily"][k] = (orig + aligned_delta).tolist()
 
+                # Correct AIFS Deterministic Single run
                 if "daily" in det_data:
                     for k in det_data["daily"].keys():
                         if "aifs" in k and k.startswith(variable):
@@ -283,18 +285,22 @@ if st.session_state.data_loaded:
         det_lines = {}
         
         k_aifs = [k for k in daily_det.keys() if k.startswith(variable) and "aifs" in k]
-        if k_aifs: det_lines["AIFS Deterministic"] = daily_det[k_aifs[0]]
+        if k_aifs:
+            det_lines["AIFS Deterministic"] = daily_det[k_aifs[0]]
         
         k_ifs = [k for k in daily_det.keys() if k.startswith(variable) and "ifs" in k and "aifs" not in k and "weathernext" not in k]
-        if k_ifs: det_lines["IFS Deterministic"] = daily_det[k_ifs[0]]
+        if k_ifs:
+            det_lines["IFS Deterministic"] = daily_det[k_ifs[0]]
         
         k_gfs = [k for k in daily_det.keys() if k.startswith(variable) and "gfs" in k]
-        if k_gfs: det_lines["GFS Deterministic"] = daily_det[k_gfs[0]]
+        if k_gfs:
+            det_lines["GFS Deterministic"] = daily_det[k_gfs[0]]
         
         k_nbm = [k for k in daily_det.keys() if k.startswith(variable) and "nbm" in k]
-        if k_nbm: det_lines["NBM (US Only)"] = daily_det[k_nbm[0]]
+        if k_nbm:
+            det_lines["NBM (US Only)"] = daily_det[k_nbm[0]]
 
-        # --- CUMULATIVE SUM ENGINE (Before Medians) ---
+        # --- CUMULATIVE SUM ENGINE (Applied Before Medians) ---
         if variable in ["precipitation_sum", "snowfall_sum"] and cumulative_toggle:
             df[member_columns] = df[member_columns].cumsum(axis=0)
             for k in det_lines.keys():
@@ -315,7 +321,7 @@ if st.session_state.data_loaded:
         st.markdown("---")
         if variable in ["temperature_2m_max", "apparent_temperature_max"]:
             st.markdown("### 📅 15-Day Expected Forecast (All Models) 🛠️")
-            st.caption(f"Data dynamically fetched from Open-Meteo on: **{fetch_time}** | *🛠️ AIFS Max Temperatures corrected for diurnal heating using high-res models.*")
+            st.caption(f"Data dynamically fetched from Open-Meteo on: **{fetch_time}** | *🛠️ AIFS & WeatherNext 2 Max Temperatures corrected for diurnal heating using high-res models.*")
         else:
             st.markdown("### 📅 15-Day Expected Forecast (All Models)")
             st.caption(f"Data dynamically fetched from Open-Meteo on: **{fetch_time}**")

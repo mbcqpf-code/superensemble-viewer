@@ -25,17 +25,18 @@ st.markdown("Compare the world's top weather models or combine them into a massi
 with st.expander("ℹ️ Understanding the Data & Model Resolutions"):
     st.markdown("""
     **Temporal Resolution & Daily Aggregations**
-    Open-Meteo calculates daily maximums, minimums, and precipitation sums by extracting the highest/lowest values from a 24-hour block of hourly data. The accuracy of this peak depends on the model's native output frequency:
-    * **IFS (9km HRES) & NBM:** Highly accurate. They output data natively at 1-hourly and 3-hourly intervals, easily capturing the exact afternoon diurnal heating peak.
+    Open-Meteo calculates daily maximums, minimums, and precipitation/snow sums by extracting the highest/lowest or accumulated values from hourly data. The accuracy of this peak depends on the model's native output frequency:
+    * **IFS (9km HRES) & NBM:** Highly accurate. They output data natively at 1-hourly and 3-hourly intervals, easily capturing the exact diurnal heating peak.
     * **GEFS & IFS Ensembles:** Output at 3-hourly intervals, providing a very close approximation of true daily extremes.
+    * **WeatherNext 2 (Google AI):** 64-member global AI ensemble operating at 0.25° resolution with 6-hourly temporal steps.
     
     **The AIFS Diurnal Correction**
-    The ECMWF AIFS (Artificial Intelligence Forecasting System) outputs data strictly at 6-hour intervals (00z, 06z, 12z, 18z). Because this completely skips the peak afternoon heating window (typically 20z-22z), the raw AIFS data often exhibits a mathematically artificial "cool bias." 
+    The ECMWF AIFS outputs data strictly at 6-hour intervals (00z, 06z, 12z, 18z). Because this skips the peak afternoon heating window (typically 20z-22z), raw AIFS daytime highs exhibit a cool bias.
     
-    *🛠️ **How we fix it:** This dashboard features a custom diurnal correction engine. It calculates the exact shape of the afternoon heating curve from the high-res deterministic models (NBM, IFS, GFS) for each specific day, extracts the missing delta, and dynamically applies it to the AIFS members to reconstruct the true physical high.*
+    *🛠️ **How we fix it:** This dashboard features a custom diurnal correction engine. It calculates the shape of the afternoon heating curve from high-res models (NBM, IFS, GFS), extracts the missing delta, and dynamically applies it to AIFS maximum temperatures.*
     
-    **Precipitation Timing (12Z to 12Z)**
-    *While Temperature variables are calculated midnight-to-midnight (Local Time), Precipitation is custom-aggregated from 12Z to 12Z to match standard operational hydrologic cycles.*
+    **Hydrologic Timing (12Z to 12Z)**
+    *While Temperature variables are calculated midnight-to-midnight (Local Time), Precipitation and Snowfall are custom-aggregated from 12Z to 12Z to match standard operational hydrologic cycles.*
     """)
 
 # 2. Create the Sidebar for User Inputs
@@ -73,16 +74,24 @@ st.sidebar.header("⚙️ Forecast Settings")
 
 variable = st.sidebar.selectbox(
     "Weather Variable",
-    ["temperature_2m_max", "apparent_temperature_max", "temperature_2m_min", "precipitation_sum"],
+    [
+        "temperature_2m_max", 
+        "apparent_temperature_max", 
+        "temperature_2m_min", 
+        "apparent_temperature_min", 
+        "precipitation_sum", 
+        "snowfall_sum"
+    ],
     format_func=lambda x: x.replace("_", " ").title()
 )
 
 # --- Checkbox Toggles ---
 st.sidebar.markdown("---")
 
-cumulative_precip = False
-if variable == "precipitation_sum":
-    cumulative_precip = st.sidebar.checkbox("💧 Show Cumulative (Running Total)", value=False)
+cumulative_toggle = False
+if variable in ["precipitation_sum", "snowfall_sum"]:
+    icon = "❄️" if variable == "snowfall_sum" else "💧"
+    cumulative_toggle = st.sidebar.checkbox(f"{icon} Show Cumulative (Running Total)", value=False)
     st.sidebar.markdown("---")
 
 st.sidebar.markdown("### 🎛️ Plot Display Toggles")
@@ -91,6 +100,7 @@ st.sidebar.markdown("**Ensembles (Box Plots)**")
 show_aifs_ens = st.sidebar.checkbox("AIFS Ensemble Spread", value=True)
 show_ifs_ens = st.sidebar.checkbox("IFS Ensemble Spread", value=True)
 show_gefs_ens = st.sidebar.checkbox("GEFS Ensemble Spread", value=True)
+show_wn2_ens = st.sidebar.checkbox("WeatherNext 2 Ensemble Spread", value=True)
 
 st.sidebar.markdown("**Deterministic (Lines)**")
 show_aifs_det = st.sidebar.checkbox("AIFS Single", value=True)
@@ -113,12 +123,12 @@ def get_weather_data(lat, lon, var):
         "forecast_days": 15
     }
     
-    # 1. Fetch All Ensembles
+    # 1. Fetch All Ensembles (including WeatherNext 2)
     ens_params = base_params.copy()
-    ens_params["models"] = "ecmwf_aifs025_ensemble,ecmwf_ifs025_ensemble,gfs_seamless"
+    ens_params["models"] = "ecmwf_aifs025_ensemble,ecmwf_ifs025_ensemble,gfs_seamless,google_weathernext2_ensemble"
     
-    if var == "precipitation_sum":
-        ens_params["hourly"] = "precipitation"
+    if var in ["precipitation_sum", "snowfall_sum"]:
+        ens_params["hourly"] = "precipitation" if var == "precipitation_sum" else "snowfall"
         
     ens_response = requests.get("https://ensemble-api.open-meteo.com/v1/ensemble", params=ens_params)
     ens_response.raise_for_status()
@@ -128,6 +138,8 @@ def get_weather_data(lat, lon, var):
         hourly_var = "apparent_temperature"
     elif "temperature" in var:
         hourly_var = "temperature_2m"
+    elif var == "snowfall_sum":
+        hourly_var = "snowfall"
     else:
         hourly_var = "precipitation"
         
@@ -150,13 +162,14 @@ if st.session_state.data_loaded:
     try:
         ens_data, det_data, fetch_time = get_weather_data(lat, lon, variable)
         
-        # --- DIURNAL CORRECTION ENGINE FOR AIFS ---
+        # --- DIURNAL CORRECTION ENGINE FOR AIFS (Max Temp Only) ---
         if variable in ["temperature_2m_max", "apparent_temperature_max"] and "hourly" in det_data:
             h_data = det_data["hourly"]
             
             h_dict = {"local_time": pd.to_datetime(h_data["time"])}
             for k, v in h_data.items():
-                if k != "time": h_dict[k] = pd.to_numeric(v, errors='coerce')
+                if k != "time":
+                    h_dict[k] = pd.to_numeric(v, errors='coerce')
                     
             df_h = pd.DataFrame(h_dict)
             
@@ -164,7 +177,7 @@ if st.session_state.data_loaded:
             df_h["utc_time"] = df_h["local_time"] - pd.to_timedelta(utc_offset, unit='s')
             df_h["local_date"] = df_h["local_time"].dt.floor('D')
 
-            ifs_cols = [c for c in h_data.keys() if "ifs" in c and "aifs" not in c]
+            ifs_cols = [c for c in h_data.keys() if "ifs" in c and "aifs" not in c and "weathernext" not in c]
             gfs_cols = [c for c in h_data.keys() if "gfs" in c]
             nbm_cols = [c for c in h_data.keys() if "nbm" in c]
 
@@ -192,13 +205,16 @@ if st.session_state.data_loaded:
                             orig = pd.Series(det_data["daily"][k])
                             det_data["daily"][k] = (orig + aligned_delta).tolist()
 
-        # --- CUSTOM 12Z-12Z PRECIPITATION AGGREGATION ---
-        if variable == "precipitation_sum" and "hourly" in ens_data and "hourly" in det_data:
+        # --- CUSTOM 12Z-12Z HYDROLOGIC AGGREGATION (Precip & Snow) ---
+        if variable in ["precipitation_sum", "snowfall_sum"] and "hourly" in ens_data and "hourly" in det_data:
+            target_hourly_var = "precipitation" if variable == "precipitation_sum" else "snowfall"
             
+            # 1. Aggregate Ensemble Hourly to 12z-12z
             ens_h = ens_data["hourly"]
             ens_h_dict = {"local_time": pd.to_datetime(ens_h["time"])}
             for k, v in ens_h.items():
-                if k != "time": ens_h_dict[k] = pd.to_numeric(v, errors='coerce')
+                if k != "time":
+                    ens_h_dict[k] = pd.to_numeric(v, errors='coerce')
             df_ens_h = pd.DataFrame(ens_h_dict)
             
             utc_offset = ens_data.get("utc_offset_seconds", 0)
@@ -208,13 +224,15 @@ if st.session_state.data_loaded:
             
             daily_ens_new = {"time": ens_12z_sums.index.strftime('%Y-%m-%d').tolist()}
             for col in ens_12z_sums.columns:
-                daily_ens_new[col.replace("precipitation", "precipitation_sum")] = ens_12z_sums[col].tolist()
+                daily_ens_new[col.replace(target_hourly_var, variable)] = ens_12z_sums[col].tolist()
             ens_data["daily"] = daily_ens_new
             
+            # 2. Aggregate Deterministic Hourly to 12z-12z
             det_h = det_data["hourly"]
             det_h_dict = {"local_time": pd.to_datetime(det_h["time"])}
             for k, v in det_h.items():
-                if k != "time": det_h_dict[k] = pd.to_numeric(v, errors='coerce')
+                if k != "time":
+                    det_h_dict[k] = pd.to_numeric(v, errors='coerce')
             df_det_h = pd.DataFrame(det_h_dict)
             
             df_det_h["utc_time"] = df_det_h["local_time"] - pd.to_timedelta(utc_offset, unit='s')
@@ -223,9 +241,8 @@ if st.session_state.data_loaded:
             
             daily_det_new = {"time": det_12z_sums.index.strftime('%Y-%m-%d').tolist()}
             for col in det_12z_sums.columns:
-                daily_det_new[col.replace("precipitation", "precipitation_sum")] = det_12z_sums[col].tolist()
+                daily_det_new[col.replace(target_hourly_var, variable)] = det_12z_sums[col].tolist()
             det_data["daily"] = daily_det_new
-
 
         # --- PROCESS ENSEMBLE DATA ---
         daily_ens = ens_data["daily"]
@@ -248,14 +265,17 @@ if st.session_state.data_loaded:
         display_name = variable.replace("_", " ").title()
         if variable == "precipitation_sum":
             display_name = "Precipitation Sum (12Z to 12Z)"
+        elif variable == "snowfall_sum":
+            display_name = "Snowfall Sum (12Z to 12Z)"
 
         # --- BUCKET MEMBERS ---
         aifs_cols = [c for c in member_columns if "aifs" in c]
-        ifs_cols = [c for c in member_columns if "ifs" in c and "aifs" not in c]
+        ifs_cols = [c for c in member_columns if "ifs" in c and "aifs" not in c and "weathernext" not in c]
         gefs_cols = [c for c in member_columns if "gfs" in c or "gefs" in c]
+        wn2_cols = [c for c in member_columns if "weathernext" in c]
         
         if not gefs_cols:
-            assigned = set(aifs_cols + ifs_cols)
+            assigned = set(aifs_cols + ifs_cols + wn2_cols)
             gefs_cols = [c for c in member_columns if c not in assigned]
 
         # --- PROCESS DETERMINISTIC DATA ---
@@ -265,7 +285,7 @@ if st.session_state.data_loaded:
         k_aifs = [k for k in daily_det.keys() if k.startswith(variable) and "aifs" in k]
         if k_aifs: det_lines["AIFS Deterministic"] = daily_det[k_aifs[0]]
         
-        k_ifs = [k for k in daily_det.keys() if k.startswith(variable) and "ifs" in k and "aifs" not in k]
+        k_ifs = [k for k in daily_det.keys() if k.startswith(variable) and "ifs" in k and "aifs" not in k and "weathernext" not in k]
         if k_ifs: det_lines["IFS Deterministic"] = daily_det[k_ifs[0]]
         
         k_gfs = [k for k in daily_det.keys() if k.startswith(variable) and "gfs" in k]
@@ -274,34 +294,38 @@ if st.session_state.data_loaded:
         k_nbm = [k for k in daily_det.keys() if k.startswith(variable) and "nbm" in k]
         if k_nbm: det_lines["NBM (US Only)"] = daily_det[k_nbm[0]]
 
-        # --- CUMULATIVE SUM ENGINE (APPLIED BEFORE MEDIAN CALCULATIONS) ---
-        if variable == "precipitation_sum" and cumulative_precip:
-            # Cumsum raw member columns FIRST
+        # --- CUMULATIVE SUM ENGINE (Before Medians) ---
+        if variable in ["precipitation_sum", "snowfall_sum"] and cumulative_toggle:
             df[member_columns] = df[member_columns].cumsum(axis=0)
             for k in det_lines.keys():
                 det_lines[k] = pd.Series(det_lines[k]).cumsum().tolist()
-            display_name = "Cumulative Precipitation (12Z to 12Z)"
+            if variable == "precipitation_sum":
+                display_name = "Cumulative Precipitation (12Z to 12Z)"
+            else:
+                display_name = "Cumulative Snowfall (12Z to 12Z)"
 
-        # --- CALCULATE MEDIANS (Accurate for both daily & cumulative) ---
+        # --- CALCULATE MEDIANS ---
         df["ensemble_median"] = df[member_columns].median(axis=1)
-        df["AIFS Median"] = df[aifs_cols].median(axis=1)
-        df["IFS Median"] = df[ifs_cols].median(axis=1)
-        df["GEFS Median"] = df[gefs_cols].median(axis=1)
+        df["AIFS Median"] = df[aifs_cols].median(axis=1) if aifs_cols else 0
+        df["IFS Median"] = df[ifs_cols].median(axis=1) if ifs_cols else 0
+        df["GEFS Median"] = df[gefs_cols].median(axis=1) if gefs_cols else 0
+        df["WeatherNext2 Median"] = df[wn2_cols].median(axis=1) if wn2_cols else 0
 
-
-        # --- The Expected Forecast Readout (Always Static Table) ---
+        # --- The Expected Forecast Readout (Static Table) ---
         st.markdown("---")
         if variable in ["temperature_2m_max", "apparent_temperature_max"]:
-            st.markdown(f"### 📅 15-Day Expected Forecast (All Models) 🛠️")
-            st.caption(f"Data dynamically fetched from Open-Meteo on: **{fetch_time}** |  *🛠️ AIFS Max Temperatures have been dynamically corrected for diurnal heating using high-res models.*")
+            st.markdown("### 📅 15-Day Expected Forecast (All Models) 🛠️")
+            st.caption(f"Data dynamically fetched from Open-Meteo on: **{fetch_time}** | *🛠️ AIFS Max Temperatures corrected for diurnal heating using high-res models.*")
         else:
-            st.markdown(f"### 📅 15-Day Expected Forecast (All Models)")
+            st.markdown("### 📅 15-Day Expected Forecast (All Models)")
             st.caption(f"Data dynamically fetched from Open-Meteo on: **{fetch_time}**")
         
+        precision = 2 if variable in ["precipitation_sum", "snowfall_sum"] else 1
         readout_data = {
-            f"AIFS Ens Median ({unit})": df["AIFS Median"].round(2),
-            f"IFS Ens Median ({unit})": df["IFS Median"].round(2),
-            f"GEFS Ens Median ({unit})": df["GEFS Median"].round(2),
+            f"AIFS Ens Median ({unit})": df["AIFS Median"].round(precision),
+            f"IFS Ens Median ({unit})": df["IFS Median"].round(precision),
+            f"GEFS Ens Median ({unit})": df["GEFS Median"].round(precision),
+            f"WeatherNext2 Ens Median ({unit})": df["WeatherNext2 Median"].round(precision),
         }
         
         if "NBM (US Only)" in det_lines:
@@ -309,13 +333,13 @@ if st.session_state.data_loaded:
             nbm_series = pd.Series(nbm_vals)
             nbm_series.index = df.index[:len(nbm_series)] 
             nbm_series = nbm_series.reindex(df.index)
-            readout_data[f"NBM Deterministic ({unit})"] = nbm_series.round(2)
+            readout_data[f"NBM Deterministic ({unit})"] = nbm_series.round(precision)
             
-        readout_data[f"Superensemble Median ({unit})"] = df["ensemble_median"].round(2)
+        readout_data[f"Superensemble Median ({unit})"] = df["ensemble_median"].round(precision)
             
         readout_df = pd.DataFrame(readout_data)
         
-        if variable == "precipitation_sum":
+        if variable in ["precipitation_sum", "snowfall_sum"]:
             readout_df.index = df.index.strftime('%b %d (12z)')
         else:
             readout_df.index = df.index.strftime('%b %d')
@@ -323,12 +347,12 @@ if st.session_state.data_loaded:
         readout_df = readout_df.T 
         st.dataframe(readout_df, use_container_width=True)
 
-
         # --- DYNAMIC PLOTTING & CALCULATION PREP ---
         active_members = []
         if show_aifs_ens: active_members.extend(aifs_cols)
         if show_ifs_ens: active_members.extend(ifs_cols)
         if show_gefs_ens: active_members.extend(gefs_cols)
+        if show_wn2_ens: active_members.extend(wn2_cols)
 
         # --- PLOT 1: The Box Plot ---
         fig = go.Figure()
@@ -433,6 +457,18 @@ if st.session_state.data_loaded:
             st.dataframe(df)
 
     except Exception as e:
-        st.error(f"Failed to fetch or process data: {e}")
+        import tenacity
+        import requests
+        
+        if isinstance(e, tenacity.RetryError):
+            original_error = e.last_attempt.exception()
+            if isinstance(original_error, requests.exceptions.HTTPError):
+                status = original_error.response.status_code
+                message = original_error.response.text
+                st.error(f"📡 Open-Meteo API Error {status}: {message}")
+            else:
+                st.error(f"Connection failed after multiple retries: {original_error}")
+        else:
+            st.error(f"Failed to fetch or process data: {e}")
 else:
     st.info("👈 Use the map or text boxes in the sidebar to select your location, then click 'Generate Forecast' to start.")

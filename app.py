@@ -20,8 +20,8 @@ if "lon" not in st.session_state:
     st.session_state.lon = -76.7870
 
 # Toggle Group Keys
-spread_keys = ["show_aifs_ens", "show_ifs_ens", "show_gefs_ens", "show_wn2_ens"]
-median_keys = ["show_super_med", "show_aifs_med", "show_ifs_med", "show_gefs_med", "show_wn2_med"]
+spread_keys = ["show_aifs_ens", "show_ifs_ens", "show_gefs_ens", "show_wn2_ens", "show_wn3_plume"]
+median_keys = ["show_super_med", "show_aifs_med", "show_ifs_med", "show_gefs_med", "show_wn2_med", "show_wn3_p50", "show_wn3_mean"]
 det_keys = ["show_aifs_det", "show_ifs_det", "show_gfs_det", "show_nbm"]
 
 for k in spread_keys:
@@ -29,7 +29,7 @@ for k in spread_keys:
         st.session_state[k] = True
 for k in median_keys:
     if k not in st.session_state:
-        st.session_state[k] = (k == "show_super_med")
+        st.session_state[k] = k in ["show_super_med", "show_wn3_p50", "show_wn3_mean"]
 for k in det_keys:
     if k not in st.session_state:
         st.session_state[k] = True
@@ -49,14 +49,15 @@ with st.expander("ℹ️ Understanding the Data & Model Resolutions"):
     * **IFS (9km HRES) & NBM:** Highly accurate. They output data natively at 1-hourly and 3-hourly intervals, easily capturing the exact diurnal heating peak.
     * **GEFS & IFS Ensembles:** Output at 3-hourly intervals, providing a close approximation of true daily extremes.
     * **AIFS & WeatherNext 2:** Global AI models operating at 0.25° resolution with 6-hourly temporal steps (00z, 06z, 12z, 18z). *Note: WeatherNext 2 extends out ~9 days and does not output surface moisture variables (dew point / apparent temperature); the probability calculator automatically adjusts its member denominator when a model ends early or lacks a variable.*
+    * **WeatherNext 3 (Google AI):** Native 1-hourly global AI ensemble out to 15 days at 0.05° (~5 km) resolution for 2m temperature and dew point (0.1° for precipitation). Open-Meteo exposes its ensemble mean and percentiles (P10–P90) rather than individual members, so it is plotted as a dedicated plume and/or P50/Mean overlay rather than mixed into the raw-member probability calculator.
     
     **The AI Diurnal Heating Correction (AIFS & WeatherNext 2)**
     Because 6-hourly output skips the peak afternoon heating window (typically 20z-22z), raw daily high temperatures from 6-hourly AI models exhibit a systemic cool bias.
     
-    *🛠️ **How we fix it:** This dashboard applies a dynamic diurnal correction engine to maximum temperatures. It samples the shape of the afternoon heating curve from high-resolution deterministic models (NBM, IFS, GFS), extracts the missing sub-synoptic delta, and dynamically restores peak afternoon temperatures for both AIFS and WeatherNext 2.*
+    *🛠️ **How we fix it:** This dashboard applies a dynamic diurnal correction engine to maximum temperatures. It samples the shape of the afternoon heating curve from high-resolution deterministic models (NBM, IFS, GFS), extracts the missing sub-synoptic delta, and dynamically restores peak afternoon temperatures for both AIFS and WeatherNext 2. WeatherNext 3 is natively 1-hourly and does not require this correction.*
     
-    **Dew Point Hourly Meteograms & Hydrologic Cycles**
-    * **Dew Point:** Handled at native hourly resolution and rendered as an operational **Ensemble Plume (Meteogram)** featuring 10th–90th percentile and 25th–75th percentile shaded bands.
+    **Hourly Meteograms & Hydrologic Cycles**
+    * **Hourly Temperature & Dew Point:** Handled at native hourly resolution and rendered as operational **Ensemble Plumes (Meteograms)** featuring 10th–90th percentile and 25th–75th percentile shaded bands.
     * **Precipitation & Snowfall:** Custom-aggregated from 12Z to 12Z UTC to match standard operational hydrologic cycles.
     """)
 
@@ -93,19 +94,24 @@ if lat != st.session_state.lat or lon != st.session_state.lon:
 
 st.sidebar.header("⚙️ Forecast Settings")
 
+VAR_LABELS = {
+    "temperature_2m_max": "Temperature 2M Max (Daily)",
+    "temperature_2m_min": "Temperature 2M Min (Daily)",
+    "temperature_2m": "Temperature (Hourly Meteogram)",
+    "apparent_temperature_max": "Apparent Temperature Max (Daily)",
+    "apparent_temperature_min": "Apparent Temperature Min (Daily)",
+    "dew_point_2m": "Dew Point (Hourly Meteogram)",
+    "precipitation_sum": "Precipitation Sum (12Z–12Z)",
+    "snowfall_sum": "Snowfall Sum (12Z–12Z)",
+}
+
 variable = st.sidebar.selectbox(
     "Weather Variable",
-    [
-        "temperature_2m_max", 
-        "apparent_temperature_max", 
-        "temperature_2m_min", 
-        "apparent_temperature_min", 
-        "dew_point_2m",
-        "precipitation_sum", 
-        "snowfall_sum"
-    ],
-    format_func=lambda x: "Dew Point (Hourly Meteogram)" if x == "dew_point_2m" else x.replace("_", " ").title()
+    list(VAR_LABELS.keys()),
+    format_func=lambda x: VAR_LABELS.get(x, x.replace("_", " ").title())
 )
+
+is_hourly_meteogram = variable in ["temperature_2m", "dew_point_2m"]
 
 # --- Checkbox Toggles ---
 st.sidebar.markdown("---")
@@ -119,7 +125,7 @@ if variable in ["precipitation_sum", "snowfall_sum"]:
 st.sidebar.markdown("### 🎛️ Plot Display Toggles")
 
 # 1. Ensemble Spread Toggles
-st.sidebar.markdown("**Ensemble Spread**" if variable != "dew_point_2m" else "**Ensemble Spread (Plume Bands)**")
+st.sidebar.markdown("**Ensemble Spread (Plume Bands)**" if is_hourly_meteogram else "**Ensemble Spread (Box Plots)**")
 col_s1, col_s2 = st.sidebar.columns(2)
 col_s1.button("Select All", key="btn_sel_spread", on_click=set_group_state, args=(spread_keys, True))
 col_s2.button("Clear All", key="btn_clr_spread", on_click=set_group_state, args=(spread_keys, False))
@@ -128,6 +134,9 @@ show_aifs_ens = st.sidebar.checkbox("AIFS Ensemble", key="show_aifs_ens")
 show_ifs_ens = st.sidebar.checkbox("IFS Ensemble", key="show_ifs_ens")
 show_gefs_ens = st.sidebar.checkbox("GEFS Ensemble", key="show_gefs_ens")
 show_wn2_ens = st.sidebar.checkbox("WeatherNext 2 Ensemble (Days 1–9)", key="show_wn2_ens")
+show_wn3_plume = False
+if is_hourly_meteogram:
+    show_wn3_plume = st.sidebar.checkbox("WeatherNext 3 Plume (P10–P90 / P25–P75)", key="show_wn3_plume")
 
 st.sidebar.markdown("---")
 
@@ -142,6 +151,10 @@ show_aifs_med = st.sidebar.checkbox("AIFS Ens Median", key="show_aifs_med")
 show_ifs_med = st.sidebar.checkbox("IFS Ens Median", key="show_ifs_med")
 show_gefs_med = st.sidebar.checkbox("GEFS Ens Median", key="show_gefs_med")
 show_wn2_med = st.sidebar.checkbox("WeatherNext 2 Ens Median", key="show_wn2_med")
+show_wn3_p50 = st.sidebar.checkbox("WeatherNext 3 P50 (Median)", key="show_wn3_p50")
+show_wn3_mean = False
+if variable == "precipitation_sum":
+    show_wn3_mean = st.sidebar.checkbox("WeatherNext 3 Mean (Exact 12Z Sum)", key="show_wn3_mean")
 
 st.sidebar.markdown("---")
 
@@ -157,8 +170,19 @@ show_gfs_det = st.sidebar.checkbox("GFS Operational", key="show_gfs_det")
 show_nbm = st.sidebar.checkbox("NBM (US Only)", key="show_nbm")
 
 
-# --- CACHE: Fetching both Daily and Hourly simultaneously ---
-@st.cache_data(ttl=3600, show_spinner="Fetching ensemble and deterministic data...")
+# --- HELPER: Safe key lookup for WeatherNext 3 responses ---
+def extract_wn3_col(hourly_dict, exact_name):
+    """Finds exact_name or exact_name_<model_suffix> without colliding with percentile suffixes."""
+    if exact_name in hourly_dict:
+        return pd.to_numeric(pd.Series(hourly_dict[exact_name]), errors='coerce')
+    for k in hourly_dict.keys():
+        if k.startswith(f"{exact_name}_google_weathernext3"):
+            return pd.to_numeric(pd.Series(hourly_dict[k]), errors='coerce')
+    return None
+
+
+# --- CACHE: Fetching Ensemble, Deterministic, and WeatherNext 3 ---
+@st.cache_data(ttl=3600, show_spinner="Fetching ensemble, deterministic, and WeatherNext 3 data...")
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=10))
 def get_weather_data(lat, lon, var):
     base_params = {
@@ -169,22 +193,22 @@ def get_weather_data(lat, lon, var):
         "precipitation_unit": "inch",
         "forecast_days": 15
     }
-    if var != "dew_point_2m":
+    if var not in ["temperature_2m", "dew_point_2m"]:
         base_params["daily"] = var
     
-    # 1. Fetch All Ensembles
+    # 1. Fetch Raw-Member Ensembles
     ens_params = base_params.copy()
     ens_params["models"] = "ecmwf_aifs025_ensemble,ecmwf_ifs025_ensemble,gfs_seamless,google_weathernext2_ensemble"
     
     if var in ["precipitation_sum", "snowfall_sum"]:
         ens_params["hourly"] = "precipitation" if var == "precipitation_sum" else "snowfall"
-    elif var == "dew_point_2m":
-        ens_params["hourly"] = "dew_point_2m"
+    elif var in ["temperature_2m", "dew_point_2m"]:
+        ens_params["hourly"] = var
         
     ens_response = requests.get("https://ensemble-api.open-meteo.com/v1/ensemble", params=ens_params)
     ens_response.raise_for_status()
     
-    # 2. Fetch All Deterministic Runs
+    # 2. Fetch Deterministic Runs
     if "apparent_temperature" in var:
         hourly_var = "apparent_temperature"
     elif "temperature" in var:
@@ -201,10 +225,40 @@ def get_weather_data(lat, lon, var):
     det_params["hourly"] = hourly_var 
     det_response = requests.get("https://api.open-meteo.com/v1/forecast", params=det_params)
     det_response.raise_for_status()
+
+    # 3. Fetch WeatherNext 3 (Mean & Percentiles via Ensemble Mean API)
+    wn3_json = None
+    wn3_hourly_vars = None
+    if var == "temperature_2m":
+        wn3_hourly_vars = "temperature_2m,temperature_2m_p10,temperature_2m_p25,temperature_2m_p50,temperature_2m_p75,temperature_2m_p90"
+    elif var == "dew_point_2m":
+        wn3_hourly_vars = "dew_point_2m,dew_point_2m_p10,dew_point_2m_p25,dew_point_2m_p50,dew_point_2m_p75,dew_point_2m_p90"
+    elif var in ["temperature_2m_max", "temperature_2m_min"]:
+        wn3_hourly_vars = "temperature_2m_p50"
+    elif var == "precipitation_sum":
+        wn3_hourly_vars = "precipitation,precipitation_p50"
+
+    if wn3_hourly_vars:
+        try:
+            wn3_params = {
+                "latitude": lat,
+                "longitude": lon,
+                "timezone": "auto",
+                "temperature_unit": "fahrenheit",
+                "precipitation_unit": "inch",
+                "forecast_days": 15,
+                "models": "google_weathernext3_ensemble_mean",
+                "hourly": wn3_hourly_vars,
+            }
+            wn3_response = requests.get("https://ensemble-api.open-meteo.com/v1/ensemble", params=wn3_params)
+            if wn3_response.status_code == 200:
+                wn3_json = wn3_response.json()
+        except Exception:
+            wn3_json = None
     
     fetch_time = datetime.now().strftime('%b %d, %Y at %I:%M %p')
             
-    return ens_response.json(), det_response.json(), fetch_time
+    return ens_response.json(), det_response.json(), wn3_json, fetch_time
 
 
 # 3. Action Button
@@ -213,7 +267,7 @@ if st.sidebar.button("Generate Forecast", type="primary", use_container_width=Tr
 
 if st.session_state.data_loaded:
     try:
-        ens_data, det_data, fetch_time = get_weather_data(lat, lon, variable)
+        ens_data, det_data, wn3_data, fetch_time = get_weather_data(lat, lon, variable)
         
         # --- DIURNAL CORRECTION ENGINE (AIFS & WEATHERNEXT 2 MAX TEMPS) ---
         if variable in ["temperature_2m_max", "apparent_temperature_max"] and "hourly" in det_data:
@@ -297,7 +351,7 @@ if st.session_state.data_loaded:
             det_data["daily"] = daily_det_new
 
         # --- PROCESS ENSEMBLE DATA ---
-        source_ens = ens_data["hourly"] if variable == "dew_point_2m" else ens_data["daily"]
+        source_ens = ens_data["hourly"] if is_hourly_meteogram else ens_data["daily"]
         member_columns = [col for col in source_ens.keys() if col.startswith(variable)]
 
         ens_dict = {"time": pd.to_datetime(source_ens["time"])}
@@ -319,13 +373,49 @@ if st.session_state.data_loaded:
                     unit = v
                     break
 
-        display_name = variable.replace("_", " ").title()
-        if variable == "precipitation_sum":
-            display_name = "Precipitation Sum (12Z to 12Z)"
-        elif variable == "snowfall_sum":
-            display_name = "Snowfall Sum (12Z to 12Z)"
-        elif variable == "dew_point_2m":
-            display_name = "Dew Point (Hourly Meteogram)"
+        display_name = VAR_LABELS.get(variable, variable.replace("_", " ").title())
+
+        # --- PROCESS WEATHERNEXT 3 DATA ---
+        wn3_plume = {}   # keys: p10, p25, p50, p75, p90 (indexed to df.index)
+        wn3_p50_series = pd.Series(np.nan, index=df.index)
+        wn3_mean_series = pd.Series(np.nan, index=df.index)
+
+        if wn3_data and "hourly" in wn3_data:
+            wn3_h = wn3_data["hourly"]
+            wn3_time = pd.to_datetime(wn3_h["time"])
+            wn3_utc_offset = wn3_data.get("utc_offset_seconds", ens_data.get("utc_offset_seconds", 0))
+
+            if is_hourly_meteogram:
+                for p in ["p10", "p25", "p50", "p75", "p90"]:
+                    s = extract_wn3_col(wn3_h, f"{variable}_{p}")
+                    if s is not None:
+                        s.index = wn3_time
+                        wn3_plume[p] = s.reindex(df.index)
+                if "p50" in wn3_plume:
+                    wn3_p50_series = wn3_plume["p50"]
+
+            elif variable in ["temperature_2m_max", "temperature_2m_min"]:
+                s_p50 = extract_wn3_col(wn3_h, "temperature_2m_p50")
+                if s_p50 is not None:
+                    tmp = pd.DataFrame({"val": s_p50.values, "local_date": wn3_time.floor('D')})
+                    if variable == "temperature_2m_max":
+                        daily_wn3 = tmp.groupby("local_date")["val"].max()
+                    else:
+                        daily_wn3 = tmp.groupby("local_date")["val"].min()
+                    wn3_p50_series = daily_wn3.reindex(df.index)
+
+            elif variable == "precipitation_sum":
+                s_p50 = extract_wn3_col(wn3_h, "precipitation_p50")
+                s_mean = extract_wn3_col(wn3_h, "precipitation")
+                utc_t = wn3_time - pd.to_timedelta(wn3_utc_offset, unit='s')
+                dates_12z = (utc_t - pd.Timedelta(hours=12)).floor('D')
+
+                if s_p50 is not None:
+                    tmp_p50 = pd.DataFrame({"val": s_p50.values, "12z_date": dates_12z})
+                    wn3_p50_series = tmp_p50.groupby("12z_date")["val"].sum(min_count=12).reindex(df.index)
+                if s_mean is not None:
+                    tmp_mean = pd.DataFrame({"val": s_mean.values, "12z_date": dates_12z})
+                    wn3_mean_series = tmp_mean.groupby("12z_date")["val"].sum(min_count=12).reindex(df.index)
 
         # --- BUCKET MEMBERS ---
         aifs_cols = [c for c in member_columns if "aifs" in c]
@@ -338,7 +428,7 @@ if st.session_state.data_loaded:
             gefs_cols = [c for c in member_columns if c not in assigned]
 
         # --- PROCESS DETERMINISTIC DATA ---
-        source_det = det_data["hourly"] if variable == "dew_point_2m" else det_data["daily"]
+        source_det = det_data["hourly"] if is_hourly_meteogram else det_data["daily"]
         det_lines = {}
         
         k_aifs = [k for k in source_det.keys() if k.startswith(variable) and "aifs" in k]
@@ -362,6 +452,10 @@ if st.session_state.data_loaded:
             df[member_columns] = df[member_columns].cumsum(axis=0)
             for k in det_lines.keys():
                 det_lines[k] = pd.Series(det_lines[k]).cumsum().tolist()
+            if wn3_p50_series.notna().any():
+                wn3_p50_series = wn3_p50_series.cumsum()
+            if wn3_mean_series.notna().any():
+                wn3_mean_series = wn3_mean_series.cumsum()
             if variable == "precipitation_sum":
                 display_name = "Cumulative Precipitation (12Z to 12Z)"
             else:
@@ -373,14 +467,17 @@ if st.session_state.data_loaded:
         df["IFS Median"] = df[ifs_cols].median(axis=1) if ifs_cols else np.nan
         df["GEFS Median"] = df[gefs_cols].median(axis=1) if gefs_cols else np.nan
         df["WeatherNext2 Median"] = df[wn2_cols].median(axis=1) if wn2_cols else np.nan
+        df["WeatherNext3 P50"] = wn3_p50_series
+        df["WeatherNext3 Mean"] = wn3_mean_series
 
         # --- The Expected Forecast Readout (Static Table) ---
         st.markdown("---")
         precision = 2 if variable in ["precipitation_sum", "snowfall_sum"] else 1
         
-        if variable == "dew_point_2m":
-            st.markdown("### 📅 15-Day Expected Forecast (Daily Mean Dew Point)")
-            st.caption(f"Data dynamically fetched from Open-Meteo on: **{fetch_time}** | *For Dew Point, the table displays 24-hour daily averages, while the meteogram below provides the full hourly evolution.*")
+        if is_hourly_meteogram:
+            var_short = "Dew Point" if variable == "dew_point_2m" else "Temperature"
+            st.markdown(f"### 📅 15-Day Expected Forecast (Daily Mean {var_short})")
+            st.caption(f"Data dynamically fetched from Open-Meteo on: **{fetch_time}** | *Table shows 24-hour daily averages; the meteogram below shows the full hourly evolution.*")
             df_daily_table = df.resample('D').mean()
             readout_data = {}
             for label, col_name in [
@@ -388,6 +485,7 @@ if st.session_state.data_loaded:
                 (f"IFS Ens Median ({unit})", "IFS Median"),
                 (f"GEFS Ens Median ({unit})", "GEFS Median"),
                 (f"WeatherNext2 Ens Median ({unit})", "WeatherNext2 Median"),
+                (f"WeatherNext3 P50 ({unit})", "WeatherNext3 P50"),
             ]:
                 if df_daily_table[col_name].notna().any():
                     readout_data[label] = df_daily_table[col_name].round(precision)
@@ -401,7 +499,10 @@ if st.session_state.data_loaded:
         else:
             if variable in ["temperature_2m_max", "apparent_temperature_max"]:
                 st.markdown("### 📅 15-Day Expected Forecast (All Models) 🛠️")
-                st.caption(f"Data dynamically fetched from Open-Meteo on: **{fetch_time}** | *🛠️ AIFS & WeatherNext 2 Max Temperatures corrected for diurnal heating using high-res models.*")
+                st.caption(f"Data dynamically fetched from Open-Meteo on: **{fetch_time}** | *🛠️ AIFS & WeatherNext 2 Max Temps corrected for diurnal heating; WeatherNext 3 is native 1-hourly.*")
+            elif variable == "precipitation_sum":
+                st.markdown("### 📅 15-Day Expected Forecast (All Models)")
+                st.caption(f"Data dynamically fetched from Open-Meteo on: **{fetch_time}** | *Note: WeatherNext 3 P50 sums hourly medians (which underestimates daily rain); WeatherNext 3 Mean is the exact 12Z–12Z ensemble mean.*")
             else:
                 st.markdown("### 📅 15-Day Expected Forecast (All Models)")
                 st.caption(f"Data dynamically fetched from Open-Meteo on: **{fetch_time}**")
@@ -412,6 +513,8 @@ if st.session_state.data_loaded:
                 (f"IFS Ens Median ({unit})", "IFS Median"),
                 (f"GEFS Ens Median ({unit})", "GEFS Median"),
                 (f"WeatherNext2 Ens Median ({unit})", "WeatherNext2 Median"),
+                (f"WeatherNext3 P50 ({unit})", "WeatherNext3 P50"),
+                (f"WeatherNext3 Mean ({unit})", "WeatherNext3 Mean"),
             ]:
                 if df[col_name].notna().any():
                     readout_data[label] = df[col_name].round(precision)
@@ -441,7 +544,6 @@ if st.session_state.data_loaded:
         if show_gefs_ens: active_members.extend(gefs_cols)
         if show_wn2_ens: active_members.extend(wn2_cols)
 
-        # Calculate how many selected members actually have valid data
         valid_member_cols = [c for c in active_members if df[c].notna().any()]
         daily_valid_counts = df[active_members].notna().sum(axis=1) if active_members else pd.Series(0, index=df.index)
         max_valid = int(daily_valid_counts.max()) if len(daily_valid_counts) > 0 else 0
@@ -450,8 +552,9 @@ if st.session_state.data_loaded:
 
         fig = go.Figure()
 
-        # --- PLOT LAYER 1: SPREAD (Plume for Dew Point, Box Plot for Daily) ---
-        if variable == "dew_point_2m":
+        # --- PLOT LAYER 1: SPREAD (Plumes for Hourly Meteograms, Box Plots for Daily) ---
+        if is_hourly_meteogram:
+            # 1a. Superensemble Plume (Steelblue)
             if valid_member_cols:
                 p10 = df[valid_member_cols].quantile(0.10, axis=1)
                 p25 = df[valid_member_cols].quantile(0.25, axis=1)
@@ -463,14 +566,31 @@ if st.session_state.data_loaded:
                 ))
                 fig.add_trace(go.Scatter(
                     x=df.index, y=p10, mode='lines', line=dict(width=0), fill='tonexty',
-                    fillcolor='rgba(70, 130, 180, 0.15)', name='Ensemble 10th–90th %ile', hoverinfo='skip'
+                    fillcolor='rgba(70, 130, 180, 0.15)', name='Superensemble 10th–90th %ile', hoverinfo='skip'
                 ))
                 fig.add_trace(go.Scatter(
                     x=df.index, y=p75, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'
                 ))
                 fig.add_trace(go.Scatter(
                     x=df.index, y=p25, mode='lines', line=dict(width=0), fill='tonexty',
-                    fillcolor='rgba(70, 130, 180, 0.35)', name='Ensemble 25th–75th %ile (IQR)', hoverinfo='skip'
+                    fillcolor='rgba(70, 130, 180, 0.35)', name='Superensemble 25th–75th %ile (IQR)', hoverinfo='skip'
+                ))
+
+            # 1b. WeatherNext 3 Plume (Coral/Red)
+            if show_wn3_plume and all(k in wn3_plume for k in ["p10", "p25", "p75", "p90"]):
+                fig.add_trace(go.Scatter(
+                    x=df.index, y=wn3_plume["p90"], mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'
+                ))
+                fig.add_trace(go.Scatter(
+                    x=df.index, y=wn3_plume["p10"], mode='lines', line=dict(width=0), fill='tonexty',
+                    fillcolor='rgba(220, 38, 38, 0.12)', name='WeatherNext 3 P10–P90', hoverinfo='skip'
+                ))
+                fig.add_trace(go.Scatter(
+                    x=df.index, y=wn3_plume["p75"], mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'
+                ))
+                fig.add_trace(go.Scatter(
+                    x=df.index, y=wn3_plume["p25"], mode='lines', line=dict(width=0), fill='tonexty',
+                    fillcolor='rgba(220, 38, 38, 0.25)', name='WeatherNext 3 P25–P75 (IQR)', hoverinfo='skip'
                 ))
         else:
             if valid_member_cols:
@@ -489,6 +609,8 @@ if st.session_state.data_loaded:
             "IFS Ens Median": (df["IFS Median"], "#f59e0b", "dash", 1.8, show_ifs_med),
             "GEFS Ens Median": (df["GEFS Median"], "#10b981", "dash", 1.8, show_gefs_med),
             "WeatherNext 2 Ens Median": (df["WeatherNext2 Median"], "#06b6d4", "dash", 1.8, show_wn2_med),
+            "WeatherNext 3 P50": (df["WeatherNext3 P50"], "#dc2626", "dash", 2.2, show_wn3_p50),
+            "WeatherNext 3 Mean": (df["WeatherNext3 Mean"], "#991b1b", "dot", 2.2, show_wn3_mean),
         }
 
         for name, (series_data, color, dash_style, line_width, is_active) in median_overlays.items():
@@ -523,7 +645,7 @@ if st.session_state.data_loaded:
                 ))
 
         fig.update_layout(
-            title=f"Forecast Spread vs Models: {display_name}<br><sup>Lat: {lat}, Lon: {lon} | Valid Members Active: {member_count_label}</sup>",
+            title=f"Forecast Spread vs Models: {display_name}<br><sup>Lat: {lat}, Lon: {lon} | Raw Members Active: {member_count_label}</sup>",
             xaxis_title="Date",
             yaxis_title=f"Value ({unit})",
             hovermode="x unified",
@@ -533,11 +655,14 @@ if st.session_state.data_loaded:
 
         st.plotly_chart(fig, use_container_width=True)
         
-        # --- Threshold Probability Calculator (Dynamically Weighted by Valid Members Per Day) ---
+        # --- Threshold Probability Calculator (Raw-Member Ensembles Only) ---
         st.markdown("---")
-        st.markdown(f"### 📊 Threshold Probability Calculator ({member_count_label} Valid Active Members)")
+        st.markdown(f"### 📊 Threshold Probability Calculator ({member_count_label} Valid Raw Members)")
+        caption_parts = []
         if max_valid != min_valid and min_valid > 0:
-            st.caption(f"*Note: Member count adjusts automatically from {max_valid} to {min_valid} after Day 9 when WeatherNext 2 concludes.*")
+            caption_parts.append(f"Member count adjusts automatically from {max_valid} to {min_valid} after Day 9 when WeatherNext 2 concludes.")
+        caption_parts.append("WeatherNext 3 is excluded from member-count probabilities because Open-Meteo provides summary percentiles rather than individual trajectories.")
+        st.caption(f"*Note: {' '.join(caption_parts)}*")
         
         col1, col2 = st.columns(2)
         with col1:
@@ -554,7 +679,7 @@ if st.session_state.data_loaded:
         operator_symbol = "≥" if "Greater" in condition else "≤"
         
         if valid_member_cols:
-            if variable == "dew_point_2m":
+            if is_hourly_meteogram:
                 if "Greater" in condition:
                     daily_data = df[valid_member_cols].resample('D').max()
                     valid_counts = daily_data.notna().sum(axis=1)
@@ -582,7 +707,7 @@ if st.session_state.data_loaded:
                 for p, h, v in zip(probabilities.values, hits.values, valid_counts.values)
             ]
         else:
-            if variable == "dew_point_2m":
+            if is_hourly_meteogram:
                 prob_x = df.resample('D').mean().index.strftime('%b %d')
             elif variable in ["precipitation_sum", "snowfall_sum"]:
                 prob_x = df.index.strftime('%b %d (12z)')
@@ -591,7 +716,7 @@ if st.session_state.data_loaded:
             probabilities = pd.Series(0, index=range(len(prob_x)))
             hover_text = ["0% (0 valid members)"] * len(prob_x)
             if active_members:
-                st.info("ℹ️ The currently selected ensemble model(s) do not provide data for this variable.")
+                st.info("ℹ️ The currently selected raw-member ensemble(s) do not provide data for this variable.")
 
         fig_prob = go.Figure()
         fig_prob.add_trace(go.Bar(
